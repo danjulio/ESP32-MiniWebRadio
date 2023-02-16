@@ -1,7 +1,28 @@
-# ESP32-MiniWebRadio V2
+# ESP32-MiniWebRadio V2 ported to gCore
 
-![Display](https://github.com/schreibfaul1/ESP32-MiniWebRadio/blob/MiniWebRadio-V2/additional_info/MiniWebRadio.jpg)
+![gCore MiniWebRadio](additional_info/gCore_MiniWebRadio.png)
 
+This is a port of schreibfaul1's MiniWebRadio V2 ported to gCore.  It's quite a fun program.  My changes include
+
+1. Support for capacitive touch I2C-based FT6236 touchscreen controller
+2. Support for 80 MHz VSPI interface to LCD
+3. gCore battery backed RTC used to provide time if a Wifi is not connected or the NTP time cannot be received (timezone set to my MST timezone)
+4. LCD Brightness control changed from PWM output to gCore brightness control
+5. SD_MMC changed to use 4-bit interface
+6. gCore power button can be used to stop audio playback (short press) or power down (long press)
+7. Made support for the IR remote even more optional as conditionally compiled code
+
+![gCore Clock Radio](additional_info/gCore_clockradio.png)
+
+I used the [Sparkfun MAX98357A I2S Breakout](https://www.sparkfun.com/products/14809) and a cheap speaker I had laying around.  Connections shown below.  I used PlatformIO for coding and builds as schreibfaul1 recommends (see his instructions for PlatformIO installation and building the project).
+
+![gCore Wiring Diagram](additional_info/gCore_wiring.png)
+
+You have to edit the ```src/common.h``` file to setup your Wifi SSID and password.  As schreibfaul1 explains you also have to unpack the ```Content_on_SD_card.zip``` to a Micro-SD card and plug that into gCore.  You can customize a lot by changing the files on the Micro-SD card including the list of internet radio stations.
+
+Files I changed include ```src/common.h```, ```src/main.cpp```,  ```lib/tftLib/tft.h``` and```lib/tftLib/tft.cpp```.  I also added the ```lib/gCore``` library.
+
+## schreibfaul1's original readme
 Features:
 <ul>
 <li>Can handle max 999 stations</li>

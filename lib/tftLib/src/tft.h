@@ -685,7 +685,7 @@ private:
 
 class TP : public TFT {
     public:
-
+        TP();
         TP(uint8_t TP_CS, uint8_t TP_IRQ);
         void loop();
         void setRotation(uint8_t m);
@@ -696,6 +696,7 @@ class TP : public TFT {
         uint16_t x=0, y=0;
         uint8_t _rotation;
         boolean f_loop=false;
+        boolean _isI2C;
         //const uint8_t TP_Dummy=0x80; //nur Startbit für XPT2046
         float xFaktor;
         float yFaktor;
@@ -709,6 +710,9 @@ class TP : public TFT {
     protected:
         uint16_t TP_Send(uint8_t set_val);
         bool read_TP(uint16_t& x, uint16_t& y);
+        bool read_FT(uint16_t& x, uint16_t& y);
+        uint8_t FT_ReadRegister8(uint8_t reg);
+        void FT_WriteRegister8(uint8_t reg, uint8_t val);
 };
 
 

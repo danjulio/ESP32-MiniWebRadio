@@ -1,9 +1,10 @@
 // first release on 09/2019
-// updated on Jul 02 2022
+// updated on Jul 02 2022, Feb 14, 2023
 
 #include "Arduino.h"
 #include "tft.h"
 #include "pins_arduino.h"
+#include <Wire.h>
 
 JPEGDecoder JpegDec;
 SPIClass*   SPItransfer;
@@ -60,6 +61,31 @@ SPIClass*   SPItransfer;
 #define ILI9488_MADCTL_MH   0x04
 #define ILI9488_MADCTL_SS   0x02
 #define ILI9488_MADCTL_GS   0x01
+
+#define FT62XX_ADDR           0x38
+#define FT62XX_G_FT5201ID     0xA8
+#define FT62XX_REG_NUMTOUCHES 0x02
+
+#define FT62XX_NUM_X             0x33
+#define FT62XX_NUM_Y             0x34
+
+#define FT62XX_REG_MODE 0x00
+#define FT62XX_REG_CALIBRATE 0x02
+#define FT62XX_REG_WORKMODE 0x00
+#define FT62XX_REG_FACTORYMODE 0x40
+#define FT62XX_REG_THRESHHOLD 0x80
+#define FT62XX_REG_POINTRATE 0x88
+#define FT62XX_REG_FIRMVERS 0xA6
+#define FT62XX_REG_CHIPID 0xA3
+#define FT62XX_REG_VENDID 0xA8
+
+#define FT62XX_VENDID 0x11
+#define FT6206_CHIPID 0x06
+#define FT6236_CHIPID 0x36
+#define FT6236U_CHIPID 0x64 
+
+#define FT62XX_DEFAULT_THRESHOLD 128
+
 //----------------------------------------------------------------------------------------------------------------------
 
 void TFT::init() {
@@ -508,6 +534,7 @@ void TFT::begin(uint8_t CS, uint8_t DC, uint8_t spi, uint8_t mosi, uint8_t miso,
     spi_TFT->begin(sclk, miso, mosi, -1);
     spi_TFT->setFrequency(_freq);
     SPItransfer = spi_TFT;
+    TFT_SCK = sclk; TFT_MOSI=mosi; TFT_MISO=miso;
 
     TFT_SPI = SPISettings(_freq, MSBFIRST, SPI_MODE0);
 
@@ -521,7 +548,7 @@ void TFT::begin(uint8_t CS, uint8_t DC, uint8_t spi, uint8_t mosi, uint8_t miso,
     digitalWrite(TFT_CS, HIGH);
 
     // log_i("DC=%d, CS=%d, MISO=%d, MOSI=%d, SCK=%d", TFT_DC, TFT_CS, TFT_MISO, TFT_MOSI, TFT_SCK);
-    spi_TFT->begin(TFT_SCK, TFT_MISO, TFT_MOSI, -1);
+    //spi_TFT->begin(TFT_SCK, TFT_MISO, TFT_MOSI, -1);
 
     init();  //
 }
@@ -4255,16 +4282,31 @@ uint8_t JPEGDecoder::pjpeg_decode_init(pjpeg_image_info_t* pInfo, pjpeg_need_byt
                                             T O U C H P A D
 ***********************************************************************************************************************/
 
+// Code for I2C based FT6236
+TP::TP() {
+    // log_i("TP I2C");
+    Wire.begin();
+    _rotation = 0;
+    _isI2C = true;
+}
+
 // Code für Touchpad mit XPT2046
 TP::TP(uint8_t CS, uint8_t IRQ) {
-    // log_i("TP init CS = %i, IRQ = %i", CS, IRQ);
-    TP_CS = CS;
-    TP_IRQ = IRQ;
-    pinMode(TP_CS, OUTPUT);
-    digitalWrite(TP_CS, HIGH);
-    pinMode(TP_IRQ, INPUT);
-    TP_SPI = SPISettings(400000, MSBFIRST, SPI_MODE0);  // slower speed
-    _rotation = 0;
+    if ((int8_t) CS != -1) {
+        // log_i("TP init CS = %i, IRQ = %i", CS, IRQ);
+        TP_CS = CS;
+        TP_IRQ = IRQ;
+        pinMode(TP_CS, OUTPUT);
+        digitalWrite(TP_CS, HIGH);
+        pinMode(TP_IRQ, INPUT);
+        TP_SPI = SPISettings(400000, MSBFIRST, SPI_MODE0);  // slower speed
+        _rotation = 0;
+        _isI2C = false;
+    } else {
+        Wire.begin();
+        _rotation = 0;
+        _isI2C = true;
+    }
 }
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -4282,19 +4324,39 @@ uint16_t TP::TP_Send(uint8_t set_val) {
 //----------------------------------------------------------------------------------------------------------------------
 
 void TP::loop() {
-    if (!digitalRead(TP_IRQ)) {
-        read_TP(x, y);  // skip first measurement
-        if (f_loop) {
-            f_loop = false;
-            if (read_TP(x, y)) {
-                if (tp_pressed) tp_pressed(x, y);
-            }  // read second measurement
+    unsigned long cur;
+    static unsigned long prev = 0;
+
+    if (_isI2C) {
+        cur = millis();
+        if ((cur - prev) > 40) {  // Don't want to read too often
+            if (read_FT(x, y)) {
+                if (f_loop) {
+                    f_loop = false;
+                    if (tp_pressed) tp_pressed(x, y);
+                }
+            } else {
+                if (f_loop == false) {
+                    if (tp_released) tp_released();
+                }
+                f_loop = true;
+            }
         }
     } else {
-        if (f_loop == false) {
-            if (tp_released) tp_released();
+        if (!digitalRead(TP_IRQ)) {
+            read_TP(x, y);  // skip first measurement
+            if (f_loop) {
+                f_loop = false;
+                if (read_TP(x, y)) {
+                    if (tp_pressed) tp_pressed(x, y);
+                }  // read second measurement
+            }
+        } else {
+            if (f_loop == false) {
+                if (tp_released) tp_released();
+            }
+            f_loop = true;
         }
-        f_loop = true;
     }
 }
 //----------------------------------------------------------------------------------------------------------------------
@@ -4310,6 +4372,7 @@ void TP::setVersion(uint8_t v) {
     if (v == 2) TP_vers = 2;
     if (v == 3) TP_vers = 3;
     if (v == 4) TP_vers = 4;
+    if (v == 5) TP_vers = 5;
 
     if (TP_vers == 0) {  // ILI9341 display
         Xmax = 1913;     // Values Calibration
@@ -4350,6 +4413,17 @@ void TP::setVersion(uint8_t v) {
         Ymin = 125;
         xFaktor = float(Xmax - Xmin) / ILI9488_WIDTH;
         yFaktor = float(Ymax - Ymin) / ILI9488_HEIGHT;
+    }
+    if (TP_vers == 5) {  // FT6236 gCore touchscreen controller
+        Xmax = 320;
+        Xmin = 0;
+        Ymax = 480;
+        Ymin = 0;
+        xFaktor = float(Xmax - Xmin) / ILI9488_WIDTH;
+        yFaktor = float(Ymax - Ymin) / ILI9488_HEIGHT;
+
+        // Set touch threshold
+        FT_WriteRegister8(FT62XX_REG_THRESHHOLD, FT62XX_DEFAULT_THRESHOLD);
     }
 }
 //----------------------------------------------------------------------------------------------------------------------
@@ -4497,5 +4571,90 @@ bool TP::read_TP(uint16_t& x, uint16_t& y) {
     }
     // log_i("TP_vers %d, Rotation %d, X = %i, Y = %i",TP_vers, _rotation, x, y);
     return true;
+}
+//----------------------------------------------------------------------------------------------------------------------
+
+bool TP::read_FT(uint16_t& x, uint16_t& y)
+{
+    uint8_t i2cdat[16];
+    int16_t raw_x, raw_y;
+    int c = 0;
+
+    // Only handle one touch
+    c = FT_ReadRegister8(FT62XX_REG_NUMTOUCHES);
+    if (c == 1) {
+        // Get data from the chip
+        Wire.beginTransmission((uint8_t) FT62XX_ADDR);
+        Wire.write((uint8_t) 0);
+        Wire.endTransmission();
+
+        Wire.requestFrom((uint8_t) FT62XX_ADDR, (uint8_t) 16);
+        for (uint8_t i=0; i<16; i++) {
+            i2cdat[i] = Wire.read();
+        }
+
+        // Get raw touch coordinates
+        raw_x = i2cdat[0x03] & 0x0F;
+        raw_x <<= 8;
+        raw_x |= i2cdat[0x04];
+        raw_y = i2cdat[0x05] & 0x0F;
+        raw_y <<= 8;
+        raw_y |= i2cdat[0x06];
+        
+        // Validate
+        raw_x = raw_x / xFaktor;
+        if (raw_x < Xmin) raw_x = 0;
+        if (raw_x > Xmax) raw_x = Xmax;
+
+        raw_y = raw_y / yFaktor;
+        if (raw_y < Ymin) raw_y = 0;
+        if (raw_y > Ymax) raw_y = Ymax;
+
+        // Handle rotation
+        if (_rotation == 0) {
+            x = raw_x;
+            y = raw_y;
+        }
+        if (_rotation == 1) {  // landscape
+            x = raw_y;
+            y = Xmax - raw_x;
+        }
+        if (_rotation == 2) {  // portrait + 180 degree
+            x = Xmax - raw_x;
+            y = Ymax - raw_y;
+        }
+        if (_rotation == 3) {  // landscape + 180 degree
+            x = Ymax - raw_y;
+            y = raw_x;
+        }
+
+        return true;
+    } else {
+        return false;
+    }
+}
+//----------------------------------------------------------------------------------------------------------------------
+
+uint8_t TP::FT_ReadRegister8(uint8_t reg)
+{
+    uint8_t x ;
+
+    Wire.beginTransmission((uint8_t) FT62XX_ADDR);
+    Wire.write(reg);
+    Wire.endTransmission();
+
+    Wire.requestFrom((uint8_t) FT62XX_ADDR, (uint8_t) 1);
+    x = Wire.read();
+
+    return x;
+}
+//----------------------------------------------------------------------------------------------------------------------
+
+void TP::FT_WriteRegister8(uint8_t reg, uint8_t val)
+{
+    Wire.beginTransmission((uint8_t) FT62XX_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
 }
 //----------------------------------------------------------------------------------------------------------------------

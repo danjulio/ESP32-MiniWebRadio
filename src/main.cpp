@@ -23,6 +23,15 @@
 
 #include "common.h"
 
+#if GCORE_HW == 1
+#include "gCore.h"
+#include <time.h>
+#include <sys/time.h>
+
+// Minimum epoch time (12:00:00 AM Jan 1 2000)
+#define MIN_EPOCH_TIME 946684800
+#endif
+
 //global variables
 const uint8_t  _max_volume     = 21;
 const uint16_t _max_stations   = 1000;
@@ -77,6 +86,9 @@ boolean        _f_muteIncrement = false; // if set increase Volume (from 0 to _c
 boolean        _f_muteDecrement = false; // if set decrease Volume (from _cur_volume to 0)
 boolean        _f_timeAnnouncement = false; // time announcement every full hour
 boolean        _f_playlistEnabled = false;
+#if GCORE_HW == 1
+boolean        _f_audioPaused = false;
+#endif
 
 String         _station = "";
 String         _stationName_nvs = "";
@@ -109,7 +121,9 @@ WebSrv webSrv;
 WiFiMulti wifiMulti;
 RTIME rtc;
 Ticker ticker;
+#if IR_PIN != -1
 IR ir(IR_PIN);                  // do not change the objectname, it must be "ir"
+#endif
 TP tp(TP_CS, TP_IRQ);
 File audioFile;
 File playlistFile;
@@ -122,6 +136,10 @@ FtpServer ftpSrv;
 #endif
 #if DECODER == 4 // wm8978
     WM8978 dac;
+#endif
+#if GCORE_HW == 1
+    gCore gc;
+    uint32_t bl_duty;
 #endif
 
 SemaphoreHandle_t  mutex_rtc;
@@ -340,13 +358,22 @@ boolean saveStationsToNVS(){
 *                                        T F T   B R I G H T N E S S                                                   *
 ***********************************************************************************************************************/
 void setTFTbrightness(uint8_t duty){ //duty 0...100 (min...max)
+#if GCORE_HW == 1
+    gc.power_set_brightness(duty);
+    bl_duty = duty;
+#else
     if(TFT_BL == -1) return;
     ledcAttachPin(TFT_BL, 1);        //Configure variable led, TFT_BL pin to channel 1
     ledcSetup(1, 12000, 8);          // 12 kHz PWM and 8 bit resolution
     ledcWrite(1, duty * 2.55);
+#endif
 }
 inline uint32_t getTFTbrightness(){
+#if GCORE_HW == 1
+    return bl_duty * 2.55;
+#else
     return ledcRead(1);
+#endif
 }
 inline uint8_t downBrightness(){
     uint8_t br; br = pref.getUShort("brightness");
@@ -1030,6 +1057,11 @@ void stopSong(){
 *                                                    S E T U P                                                         *
 ***********************************************************************************************************************/
 void setup(){
+#if GCORE_HW == 1
+    struct timeval tv;
+    time_t secs;
+#endif
+
     Serial.begin(115200);
 
     const char* chipModel  = ESP.getChipModel();
@@ -1070,6 +1102,13 @@ void setup(){
     pref.begin("MiniWebRadio", false);  // instance of preferences for defaults (tone, volume ...)
     stations.begin("Stations", false);  // instance of preferences for stations (name, url ...)
 
+    #if GCORE_HW == 1
+        gc.begin();
+        gc.power_set_button_short_press_msec(100);
+        gc.power_set_brightness(75);
+        bl_duty = 75;
+    #endif
+
     #if CONFIG_IDF_TARGET_ESP32
         tft.begin(TFT_CS, TFT_DC, VSPI, TFT_MOSI, TFT_MISO, TFT_SCK);    // Init TFT interface ESP32
     #else
@@ -1087,7 +1126,11 @@ void setup(){
         SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
     #endif
     int sdmmc_frequency = SDMMC_FREQUENCY / 1000; // MHz -> KHz, default is 40MHz
+    #if GCORE_HW == 1
+    if (!SD_MMC.begin()) {
+    #else
     if(!SD_MMC.begin("/sdcard", true, false, sdmmc_frequency)){
+    #endif
         clearAll();
         tft.setFont(_fonts[5]);
         tft.setTextColor(TFT_YELLOW);
@@ -1102,7 +1145,7 @@ void setup(){
     defaultsettings();  // first init
     if(getBrightness() >= 5) setTFTbrightness(getBrightness());
     else                     setTFTbrightness(5);
-    if(TFT_CONTROLLER > 4) SerialPrintfln(ANSI_ESC_RED "The value in TFT_CONTROLLER is invalid");
+    if(TFT_CONTROLLER > 5) SerialPrintfln(ANSI_ESC_RED "The value in TFT_CONTROLLER is invalid");
     drawImage("/common/MiniWebRadioV2.jpg", 0, 0); // Welcomescreen
     SerialPrintfln("setup: ....  seek for stations.csv");
     File file=SD_MMC.open("/stations.csv");
@@ -1138,9 +1181,29 @@ void setup(){
 
     _f_rtc = rtc.begin(TZName);
     if(!_f_rtc){
+#if GCORE_HW == 0
         SerialPrintfln(ANSI_ESC_RED "connection to NTP failed, trying again");
         ESP.restart();
+#else
+        secs = gc.rtc_get_time_secs();
+        if (secs < MIN_EPOCH_TIME) {
+            secs = MIN_EPOCH_TIME;
+        }
+        SerialPrintfln(ANSI_ESC_ORANGE "NTP failed, set RTC from gCore to %d", secs);
+        tv.tv_sec = secs;
+        tv.tv_usec = 0;
+        settimeofday((const struct timeval *) &tv, NULL);
+#endif
     }
+#if GCORE_HW == 1
+    else {
+        // Set gCore's RTC from the newly acquired time
+        (void) gettimeofday(&tv, NULL);
+        secs = tv.tv_sec;
+        SerialPrintfln(ANSI_ESC_WHITE "setting gCore RTC to %d", secs);
+        (void) gc.rtc_set_time_secs(secs);
+    }
+#endif
 
     #if DECODER > 1 // DAC controlled by I2C
         if(!dac.begin(I2C_DATA, I2C_CLK)){
@@ -1161,8 +1224,9 @@ void setup(){
     _alarmtime = pref.getUInt("alarm_time");
     _f_timeAnnouncement = pref.getBool("timeAnnouncing");
     _state = RADIO;
-
-     ir.begin();  // Init InfraredDecoder
+#if IR_PIN != -1
+    ir.begin();  // Init InfraredDecoder
+#endif
 
     webSrv.begin(80, 81); // HTTP port, WebSocket port
 
@@ -1717,7 +1781,9 @@ void changeState(int state){
 ***********************************************************************************************************************/
 void loop() {
     if(webSrv.loop()) return; // if true: ignore all other for faster response to web
+#if IR_PIN != -1
     ir.loop();
+#endif
     tp.loop();
     ftpSrv.handleFTP();
 
@@ -1824,7 +1890,7 @@ void loop() {
                 connecttoFS("/ring/alarm_clock.mp3");
                 audioSetVolume(21);
             }
-            if(_f_hpChanged){
+            if((_f_hpChanged) && (HP_DETECT != -1)){
                 setVolume(_cur_volume);
                 if(!digitalRead(HP_DETECT)) {SerialPrintfln("Headphone plugged in");}
                 else                        {SerialPrintfln("Headphone unplugged");}
@@ -1858,6 +1924,13 @@ void loop() {
             webSrv.send((String)"streamtitle=" + _commercial);
             _f_newCommercial = false;
         }
+#if GCORE_HW == 1
+        // Quick press of gCore power button used to stop audio playback because sometimes silence is golden...
+        // (use long-press to turn device off)
+        if (gc.power_button_pressed()) {
+            audioStopSong();
+        }
+#endif
     }
     if(_f_1min == true){
         updateSleepTime();
